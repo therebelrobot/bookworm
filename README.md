@@ -15,9 +15,9 @@ A unified API for searching both physical and digital media from library sources
 
 ### Prerequisites
 
-- Node.js (v18 or higher)
-- Puppeteer-compatible browser (for scraping)
-- Access credentials for the legacy library system
+- Node.js (v18 or higher) with npm
+- A Cloudflare account on the **Workers Paid** plan (Browser Rendering is required for scraping)
+- Access credentials for the legacy library system (sent per request as query params)
 - Access to the YCL digital assets service (optional)
 
 ### Installation
@@ -33,37 +33,68 @@ A unified API for searching both physical and digital media from library sources
    npm install
    ```
 
-3. Create a `.env` file based on `.env.sample`:
+3. Create the KV namespace that caches login cookies, and copy the id it prints:
    ```
-   cp .env.sample .env
-   ```
-
-4. Update the `.env` file with your configuration:
-   ```
-   # Legacy system configuration
-   LEGACY_SITE_URL=<legacy-site-url>
-   LEGACY_SITE_USERNAME=<username>
-   LEGACY_SITE_PASSWORD=<password>
-
-   # YCL (digital assets) configuration
-   YCL_HOST=ebook.yourcloudlibrary.com
-   YCL_PROTOCOL=https
-   YCL_LIBRARY_SLUG=<your-library-slug>
-   YCL_AUTH_URL=https://ebook.yourcloudlibrary.com/auth/login
-
-   # Puppeteer browser configuration
-   BROWSER_WS_ENDPOINT=<browser-ws-endpoint>
-   PORT=7700
+   npx wrangler kv namespace create COOKIE_CACHE
    ```
 
-### Running the Server
+4. Paste that id into `wrangler.jsonc` (`kv_namespaces[0].id`), then store every
+   environment-specific value as a secret (they are never committed):
+   ```
+   npx wrangler secret put LEGACY_SITE_URL     # base URL of your Legacy Library site
+   npx wrangler secret put YCL_HOST            # digital assets host
+   npx wrangler secret put YCL_PROTOCOL        # https | http (optional; defaults to https)
+   npx wrangler secret put YCL_LIBRARY_SLUG    # your digital library slug
+   npx wrangler secret put YCL_AUTH_URL        # digital auth URL
+   ```
+   Configuration is no longer read from a `.env` file at runtime; for local dev,
+   put the same values in a gitignored `.dev.vars` file, which `wrangler dev`
+   loads automatically.
 
-Start the server:
+### Running Locally
+
+Create your local secrets file from the template (it is gitignored):
 ```
-npm start
+cp .dev.vars.example .dev.vars   # then fill in real values
 ```
 
-The server will be available at http://localhost:7700 (or the port specified in your .env file).
+Start the Worker dev server (uses a real browser via the Browser Rendering binding,
+so run `npx wrangler login` first):
+```
+npm run dev        # wrangler dev
+```
+
+The API will be available at http://localhost:8787.
+
+Type-check the project with:
+```
+npm run typecheck
+```
+
+### Deploying to Cloudflare Workers
+
+```
+npm run deploy     # wrangler deploy
+```
+
+### npm scripts
+
+| Script | Description |
+| --- | --- |
+| `npm run dev` | Start the local dev server (`wrangler dev`) at http://localhost:8787 |
+| `npm run build` | Bundle and validate without uploading (`wrangler deploy --dry-run`, output in `dist/`) |
+| `npm run deploy` | Build and deploy the Worker (`wrangler deploy`) |
+| `npm run tail` | Stream live logs from the deployed Worker |
+| `npm run check` | Run `typecheck` then `build` (handy in CI) |
+| `npm run typecheck` | Type-check with `tsc --noEmit` |
+| `npm run cf-typegen` | Regenerate `worker-configuration.d.ts` from your bindings |
+| `npm run login` / `logout` / `whoami` | Cloudflare authentication helpers |
+| `npm run secrets:list` | List the Worker's secrets |
+| `npm run secrets:put -- <NAME>` | Create or update one secret (prompts for the value) |
+| `npm run secrets:push` | Upload every key in `.dev.vars` (`wrangler secret bulk`) |
+| `npm run secrets:delete -- <NAME>` | Delete a secret |
+| `npm run kv:create` | Create the `COOKIE_CACHE` KV namespace |
+| `npm run kv:list` | List KV namespaces |
 
 ## API Endpoints
 
@@ -181,10 +212,12 @@ Returns combined search results from both physical and digital sources.
 ### Project Structure
 
 ```
+wrangler.jsonc                # Worker name, bindings (BROWSER, COOKIE_CACHE) and vars
 src/
-├── server.ts                 # Main server file
+├── server.ts                 # Worker entry point (Hono app; replaces the Express server)
+├── env.ts                    # Worker binding/config types
 ├── lw/                       # Legacy system client
-│   └── client.ts             # Legacy scraping implementation
+│   └── client.ts             # Legacy scraping via Browser Rendering
 ├── ycl/                      # YCL digital assets client
 │   ├── client.ts             # YCL API client
 │   ├── constants.ts          # YCL constants
@@ -197,6 +230,22 @@ src/
 │   ├── yclService.ts         # YCL service
 │   └── searchService.ts      # Combined search service
 ```
+
+### Cloudflare Workers notes
+
+This service was ported from a long-running Node/Express process to a Cloudflare Worker:
+
+- **Scraping** uses Cloudflare Browser Rendering through `@cloudflare/puppeteer`
+  (`puppeteer.launch(env.BROWSER)`), not a remote Chrome WebSocket endpoint.
+- **Digital-media HTTP** uses the platform `fetch` instead of `got`. HTTP/2
+  pseudo-headers are dropped, and compression is handled by `fetch`.
+- **Login cookies** are cached in the `COOKIE_CACHE` KV namespace instead of on disk.
+- **Credential hashing** uses WebCrypto (`crypto.subtle`) instead of Node's `crypto`.
+- **Routing/CORS** use [Hono](https://hono.dev) instead of Express.
+- `process.env` is replaced by Worker bindings and secrets (`src/env.ts`). All
+  environment-specific values are stored via `wrangler secret put`, not in config.
+
+The former `Dockerfile`/`.dockerignore` were removed since deployment is now handled by `wrangler`.
 
 ### API Documentation
 

@@ -1,4 +1,3 @@
-import { Page } from 'puppeteer';
 import { catalogSearch, catalogDetail, CatalogResponse } from '../ycl/client';
 import { getRedirectSetCookie } from '../ycl/getRedirectSetCookie';
 import { UnifiedResult } from '../models/unifiedResult';
@@ -25,6 +24,7 @@ export interface YCLServiceState {
 
 // Re-export the getRedirectSetCookie function from the YCL module
 export { getRedirectSetCookie } from '../ycl/getRedirectSetCookie';
+export { catalogDetail };
 
 /**
  * Search for digital assets
@@ -82,7 +82,7 @@ export const searchYCL = async (
 
     // Transform YCL results to unified format
     const results = response.json.results.search.items.map(item =>
-      mapYCLItemToUnifiedResult(item, state.config.librarySlug)
+      mapYCLItemToUnifiedResult(item, state.config.librarySlug, state.config)
     );
 
     logger.info(`Found ${results.length} digital assets`);
@@ -138,11 +138,18 @@ export const getYCLTotalCount = async (
  * Map YCL item to unified result format
  * @param item YCL search result item
  * @param librarySlug The library slug to use in the details URL
+ * @param config The YCL service config (used to build the external details URL)
  * @returns Unified result
  */
-export const mapYCLItemToUnifiedResult = (item: any, librarySlug: string): UnifiedResult => {
-  // Get the base URL from environment variable
-  const baseUrl = process.env.YCL_AUTH_URL?.replace(/\/[^\/]*$/, '') || 'https://example.com';
+export const mapYCLItemToUnifiedResult = (
+  item: any,
+  librarySlug: string,
+  config: YCLServiceConfig
+): UnifiedResult => {
+  // Build the external details page URL from the configured host.
+  // (The original read this from process.env.YCL_AUTH_URL, unavailable in Workers.)
+  const protocol = config.protocol || 'https';
+  const baseUrl = `${protocol}://${config.host}`;
 
   // Generate the external details page URL using documentId
   const detailsUrl = `${baseUrl}/library/${librarySlug}/detail/${item.documentId}`;

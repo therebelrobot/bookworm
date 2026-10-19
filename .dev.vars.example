@@ -1,0 +1,13 @@
+# Local development secrets for `wrangler dev`.
+#
+# Copy this file to `.dev.vars` (which is gitignored) and fill in real values:
+#   cp .dev.vars.example .dev.vars
+#
+# These are used only locally. For production, set the same names as Worker
+# secrets with `npx wrangler secret put <NAME>` instead.
+
+LEGACY_SITE_URL=https://example.com/library
+YCL_HOST=ebook.example.com
+YCL_PROTOCOL=https
+YCL_LIBRARY_SLUG=your-library-slug
+YCL_AUTH_URL=https://ebook.example.com/library
