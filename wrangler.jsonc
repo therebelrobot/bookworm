@@ -1,41 +1,39 @@
 {
-  "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "library-media-search",
-  "main": "src/server.ts",
-
-  // 2026-08-04 or later enables nodejs_compat by default, which the
-  // @cloudflare/puppeteer runtime needs (it imports node:buffer).
-  "compatibility_date": "2026-08-04",
-
-  "upload_source_maps": true,
-  "workers_dev": true,
-
-  // Browser Rendering binding — exposed to the Worker as `env.BROWSER`
-  // and used by `puppeteer.launch(env.BROWSER)`.
-  "browser": {
-    "binding": "BROWSER"
-  },
-
-  // Cookie cache. Create it once with:
-  //   npx wrangler kv namespace create COOKIE_CACHE
-  // then paste the returned id below (and a preview_id for local dev if you like).
-  "kv_namespaces": [
-    {
-      "binding": "COOKIE_CACHE",
-      "id": "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
-    }
-  ],
-
-  // All environment-specific configuration is stored as secrets, never in this
-  // file. Set them once (repeat for each name):
-  //   npx wrangler secret put LEGACY_SITE_URL     # base URL of your Legacy Library site
-  //   npx wrangler secret put YCL_HOST            # digital assets host
-  //   npx wrangler secret put YCL_PROTOCOL        # https | http (optional; defaults to https)
-  //   npx wrangler secret put YCL_LIBRARY_SLUG    # your digital library slug
-  //   npx wrangler secret put YCL_AUTH_URL        # digital auth URL
-  // (For local dev, put them in a gitignored .dev.vars file instead.)
-
-  "observability": {
-    "enabled": true
-  }
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"name": "library-media-search",
+	"main": "src/server.ts",
+	// 2026-08-04 or later enables nodejs_compat by default, which the
+	// @cloudflare/puppeteer runtime needs (it imports node:buffer).
+	"compatibility_date": "2026-08-04",
+	"upload_source_maps": true,
+	"workers_dev": true,
+	// The custom domain is intentionally NOT declared here, so the hostname is not
+	// committed. Attach it once via the dashboard (Worker -> Settings -> Domains &
+	// Routes -> Add -> Custom Domain); it persists across deploys. To do it from
+	// the CLI instead, pass it per deploy: `npm run deploy -- --domain <hostname>`.
+	// Browser Rendering binding — exposed to the Worker as `env.BROWSER`
+	// and used by `puppeteer.launch(env.BROWSER)`.
+	"browser": {
+		"binding": "BROWSER"
+	},
+	// Cookie cache. Create it once with:
+	//   npx wrangler kv namespace create COOKIE_CACHE
+	// then paste the returned id below (and a preview_id for local dev if you like).
+	"kv_namespaces": [
+		{
+			"binding": "COOKIE_CACHE",
+			"id": "ee4611ecf7eb408aa2c73f7a5f173c07"
+		}
+	],
+	// All environment-specific configuration is stored as secrets, never in this
+	// file. Set them once (repeat for each name):
+	//   npx wrangler secret put LEGACY_SITE_URL     # base URL of your Legacy Library site
+	//   npx wrangler secret put YCL_HOST            # digital assets host
+	//   npx wrangler secret put YCL_PROTOCOL        # https | http (optional; defaults to https)
+	//   npx wrangler secret put YCL_LIBRARY_SLUG    # your digital library slug
+	//   npx wrangler secret put YCL_AUTH_URL        # digital auth URL
+	// (For local dev, put them in a gitignored .dev.vars file instead.)
+	"observability": {
+		"enabled": true
+	}
 }
