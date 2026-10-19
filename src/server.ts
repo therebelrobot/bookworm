@@ -29,12 +29,18 @@ const getLegacyConfig = (env: Env) => ({
   legacySiteUrl: env.LEGACY_SITE_URL || 'http://example.com'
 });
 
-const getYclConfig = (env: Env, librarySlug: string | undefined) => env.YCL_HOST ? {
-  host: env.YCL_HOST,
-  protocol: (env.YCL_PROTOCOL || 'https') as 'https' | 'http',
-  librarySlug: env.YCL_LIBRARY_SLUG || '',
-  authUrl: env.YCL_AUTH_URL ? `${env.YCL_AUTH_URL}/${librarySlug}/featured` : ''
-} : null;
+const getYclConfig = (env: Env, librarySlug: string | undefined) => {
+  if (!env.YCL_HOST) return null;
+  // A per-request slug wins; otherwise fall back to the Worker's configured
+  // slug. Both the auth URL and the search itself must use the same slug.
+  const slug = librarySlug || env.YCL_LIBRARY_SLUG || '';
+  return {
+    host: env.YCL_HOST,
+    protocol: (env.YCL_PROTOCOL || 'https') as 'https' | 'http',
+    librarySlug: slug,
+    authUrl: env.YCL_AUTH_URL ? `${env.YCL_AUTH_URL}/${slug}/featured` : ''
+  };
+};
 
 // Health check endpoint
 app.get('/health', (c) => {
@@ -100,7 +106,9 @@ app.get('/api/search', async (c) => {
     const searchQuery = c.req.query('search');
     const username = c.req.query('username') || '';
     const password = c.req.query('password') || '';
-    const librarySlug = c.req.query('librarySlug');
+    // Fall back to the Worker's configured slug so callers don't have to know it
+    // and combined search isn't silently reduced to print-only when it's omitted.
+    const librarySlug = c.req.query('librarySlug') || c.env.YCL_LIBRARY_SLUG || undefined;
 
     // Parse numeric parameters
     const pageParam = c.req.query('page');

@@ -204,6 +204,14 @@ export const performCombinedSearch = async (
     if (resultIndex < results.length) {
       yclTotalCount = results[resultIndex++] || 0;
     }
+
+    // YCL ignores the `offset`/`limit` query parameters and always returns the
+    // full result set, so unified pagination has to be applied here. The length
+    // guard means a future, correctly paginated YCL response is passed through
+    // untouched.
+    if (yclResults.length > pageSize) {
+      yclResults = paginateResults(yclResults, page, pageSize);
+    }
   }
 
   // Combine results based on mediaType filter
@@ -214,13 +222,16 @@ export const performCombinedSearch = async (
   } else if (mediaType === 'digital') {
     combinedResults = yclResults;
   } else {
-    // For combined results, we need to merge and sort
+    // For combined results, we need to merge and sort.
+    //
+    // TODO(pagination): the two sources are paged independently and only the
+    // legacy *page* is fetched, so the merged list differs per page and some
+    // items can be repeated or skipped between pages. Making this exact needs
+    // the full legacy result set (walking every upstream page) before merging.
     combinedResults = mergeAndSortResults(legacyResults, yclResults, sortBy);
 
     // Apply unified pagination to combined results
-    const startIndex = (page - 1) * pageSize;
-    const endIndex = startIndex + pageSize;
-    combinedResults = combinedResults.slice(startIndex, endIndex);
+    combinedResults = paginateResults(combinedResults, page, pageSize);
   }
 
   // Create pagination metadata
@@ -239,6 +250,22 @@ export const performCombinedSearch = async (
     meta,
     results: combinedResults
   };
+};
+
+/**
+ * Slice a result array down to a single page.
+ * @param results Full result set
+ * @param page 1-based page number
+ * @param pageSize Number of results per page
+ * @returns The requested slice
+ */
+export const paginateResults = <T>(
+  results: T[],
+  page: number,
+  pageSize: number
+): T[] => {
+  const startIndex = (page - 1) * pageSize;
+  return results.slice(startIndex, startIndex + pageSize);
 };
 
 /**

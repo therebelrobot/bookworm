@@ -130,7 +130,8 @@ Parameters:
 - `search` (required): The search term
 - `username` (required): Legacy system username
 - `password` (optional): Legacy system password
-- `librarySlug` (optional): YCL library identifier, if omitted digital search will be skipped
+- `librarySlug` (optional): YCL library identifier. Defaults to the Worker's
+  `YCL_LIBRARY_SLUG` secret; digital search is only skipped when neither is set.
 - `page` (optional, default: 1): Page number for unified pagination
 - `pageSize` (optional, default: 10): Number of results per page
 - `mediaType` (optional, default: "combined"): Filter type - "physical", "digital", or "combined"
@@ -138,6 +139,12 @@ Parameters:
 - `version` (optional, default: "v2"): API response version - "v1" for legacy format, "v2" for new format
 
 Returns combined search results from both physical and digital sources.
+
+> **Pagination note:** the legacy (physical) source is paged by the upstream
+> catalogue. The digital (YCL) source ignores `offset`/`limit` and returns its
+> entire result set, so the Worker applies `page`/`pageSize` to the digital
+> results itself before merging. Combined ordering is therefore approximate —
+> see the follow-up note in the code for details.
 
 ## Response Format
 
