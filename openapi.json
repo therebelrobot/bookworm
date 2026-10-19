@@ -191,7 +191,7 @@
             "name": "librarySlug",
             "in": "query",
             "required": false,
-            "description": "The library identifier for digital assets. If omitted, only physical media will be searched.",
+            "description": "The library identifier for digital assets. Defaults to the Worker's YCL_LIBRARY_SLUG secret; digital search is only skipped when neither is set.",
             "schema": {
               "type": "string"
             }
