@@ -1,4 +1,4 @@
-import { Page } from 'puppeteer';
+import type { Page } from '@cloudflare/puppeteer';
 import { scrapeLegacySite } from '../lw/client';
 import { UnifiedResult } from '../models/unifiedResult';
 import loggers from '../utils/logger';
@@ -16,7 +16,7 @@ export interface LegacyServiceState {
  * Create a new Legacy service state
  */
 export const createLegacyServiceState = (
-  legacySiteUrl: string = process.env.LEGACY_SITE_URL || 'http://example.com'
+  legacySiteUrl: string = 'http://example.com'
 ): LegacyServiceState => ({
   legacySiteUrl
 });
@@ -30,6 +30,7 @@ export const createLegacyServiceState = (
  * @param page Page number (1-based)
  * @param pageSize Number of results per page (not directly controllable in legacy system)
  * @param puppeteerPage Puppeteer page instance
+ * @param cookieCache KV namespace used to persist login cookies
  * @returns Search results and pagination metadata
  */
 export const searchLegacy = async (
@@ -39,7 +40,8 @@ export const searchLegacy = async (
   password: string = '',
   page: number = 1,
   pageSize: number = 10,
-  puppeteerPage: Page
+  puppeteerPage: Page,
+  cookieCache: KVNamespace
 ): Promise<{
   results: UnifiedResult[];
   totalResults: number;
@@ -51,7 +53,15 @@ export const searchLegacy = async (
     logger.info(`Searching legacy system for "${searchText}" (page ${page})`);
 
     // Use the existing scrape function
-    const scrapeResponse = await scrapeLegacySite(searchText, username, password, page, puppeteerPage);
+    const scrapeResponse = await scrapeLegacySite({
+      search: searchText,
+      username,
+      password,
+      targetPage: page,
+      page: puppeteerPage,
+      legacySiteUrl: state.legacySiteUrl,
+      cookieCache,
+    });
 
     // Transform legacy results to unified format
     const results = scrapeResponse.results.map(mapLegacyBookToUnifiedResult);

@@ -136,4 +136,18 @@ cookies.json
 cookies.*.json
 *.json
 
+# ...but always track project configuration files that look like JSON
+!package.json
+!package-lock.json
+!tsconfig.json
+!wrangler.jsonc
+!openapi.json
+
+# Wrangler build/dev artifacts and local secret overrides
+.wrangler/
+.wrangler-dryrun/
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+
 debug/

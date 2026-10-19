@@ -1,4 +1,4 @@
-import { Page } from 'puppeteer';
+import type { Page } from '@cloudflare/puppeteer';
 import {
   UnifiedResult,
   SearchResponse,
@@ -28,13 +28,15 @@ const { search: logger } = loggers;
  * @param yclConfig YCL service configuration (optional)
  * @param params Search parameters
  * @param puppeteerPage Puppeteer page instance
+ * @param cookieCache KV namespace used to persist legacy login cookies
  * @returns Search response
  */
 export const performCombinedSearch = async (
   legacyConfig: { legacySiteUrl: string },
   yclConfig: YCLServiceConfig & { authUrl: string } | null,
   params: SearchParams,
-  puppeteerPage: Page
+  puppeteerPage: Page,
+  cookieCache: KVNamespace
 ): Promise<SearchResponse> => {
   const {
     search,
@@ -67,7 +69,8 @@ export const performCombinedSearch = async (
       password,
       page,
       pageSize,
-      puppeteerPage
+      puppeteerPage,
+      cookieCache
     );
     promises.push(legacyPromise);
   }

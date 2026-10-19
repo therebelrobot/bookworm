@@ -1,4 +1,4 @@
-import { HTTPResponse, Page } from 'puppeteer'
+import type { HTTPResponse, Page } from '@cloudflare/puppeteer'
 import { NAVIGATION_OPTIONS } from './constants'
 import loggers from '../utils/logger'
 

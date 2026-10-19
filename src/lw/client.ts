@@ -1,20 +1,7 @@
-import puppeteer, { ElementHandle, LaunchOptions, Page } from 'puppeteer';
-// import StealthPlugin from 'puppeteer-extra-plugin-stealth'
-import fs from 'fs';
-import path from 'path';
-import express from 'express';
-import cors from 'cors'; // Import the cors middleware
-import dotenv from 'dotenv';
+import type { CookieParam, ElementHandle, Page } from '@cloudflare/puppeteer';
 import loggers from '../utils/logger';
 
 const { lw: logger } = loggers;
-
-const COOKIE_PATH = __dirname;
-const LEGACY_SITE_URL = process.env.LEGACY_SITE_URL || 'http://example.com'; // Replace with the actual URL of the legacy site
-const LOGIN_URL = `${LEGACY_SITE_URL}/index.php`;
-
-// make sure Cloudflare is not blocking us
-// puppeteer.use(StealthPlugin())
 
 // ------------------------
 // Helper functions
@@ -23,7 +10,7 @@ const LOGIN_URL = `${LEGACY_SITE_URL}/index.php`;
 // Safely evaluates a function in the page context and returns null on error.
 const safePageEvaluate = async <T>(page: Page, fn: () => T): Promise<T | null> => {
   try {
-    return await page.evaluate(fn);
+    return (await page.evaluate(fn)) as T;
   } catch (error) {
     return null;
   }
@@ -36,7 +23,9 @@ const safe$eval = async <T>(
   pageFunction: (el: Element) => T
 ): Promise<T | null> => {
   try {
-    return await container.$eval(selector, pageFunction);
+    // Puppeteer's $eval generics are awkward to satisfy with a forwarded callback;
+    // the runtime contract is identical, so we narrow the types here.
+    return (await (container.$eval as any)(selector, pageFunction)) as T;
   } catch (error) {
     return null;
   }
@@ -48,7 +37,7 @@ const safeQuerySelector = async (
   selector: string
 ): Promise<ElementHandle<Element> | null> => {
   try {
-    return await container.$(selector);
+    return (await container.$(selector)) as ElementHandle<Element> | null;
   } catch (error) {
     return null;
   }
@@ -58,34 +47,47 @@ const safeQuerySelector = async (
 // Cookie management
 // ------------------------
 
-// function to hash username and password for cookie file name
-const hashCredentials = (username: string, password?: string): string => {
-  const hash = require('crypto').createHash('sha256');
-
-  // Update the hash with the username and password
-  hash.update(username);
-  hash.update(password || ''); // Use empty string if password is not provided
-
-  // Return the hexadecimal digest of the hash
-  return hash.digest('hex');
+// Hash username/password for the cookie cache key.
+// Uses WebCrypto instead of Node's `crypto` (unavailable in Workers).
+const hashCredentials = async (username: string, password?: string): Promise<string> => {
+  const data = new TextEncoder().encode(username + (password || ''));
+  const digest = await crypto.subtle.digest('SHA-256', data);
+  return Array.from(new Uint8Array(digest))
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('');
 };
 
-// Load cookies from disk if they exist.
-const loadCookies = async (page: Page, username: string, password?: string): Promise<void> => {
-  const credentialHash = hashCredentials(username, password);
-  const cookieFilePath = path.join(COOKIE_PATH, `cookies.${credentialHash}.json`);
-  if (fs.existsSync(cookieFilePath)) {
-    const cookies = JSON.parse(fs.readFileSync(cookieFilePath, 'utf-8'));
-    await page.setCookie(...cookies);
+const cookieCacheKey = async (username: string, password?: string): Promise<string> =>
+  `cookies.${await hashCredentials(username, password)}.json`;
+
+// Load cookies from the KV cache if they exist.
+const loadCookies = async (
+  page: Page,
+  cookieCache: KVNamespace,
+  username: string,
+  password?: string
+): Promise<void> => {
+  try {
+    const key = await cookieCacheKey(username, password);
+    const cookies = await cookieCache.get<CookieParam[]>(key, 'json');
+    if (Array.isArray(cookies) && cookies.length > 0) {
+      await page.setCookie(...cookies);
+    }
+  } catch (error) {
+    logger.warn('Unable to load cached cookies (continuing without them):', error);
   }
 };
 
-// Save current page cookies to disk.
-const saveCookies = async (page: Page, username: string, password?: string): Promise<void> => {
-  const credentialHash = hashCredentials(username, password);
-  const cookieFilePath = path.join(COOKIE_PATH, `cookies.${credentialHash}.json`);
+// Save current page cookies to the KV cache.
+const saveCookies = async (
+  page: Page,
+  cookieCache: KVNamespace,
+  username: string,
+  password?: string
+): Promise<void> => {
+  const key = await cookieCacheKey(username, password);
   const cookies = await page.cookies();
-  fs.writeFileSync(cookieFilePath, JSON.stringify(cookies, null, 2));
+  await cookieCache.put(key, JSON.stringify(cookies));
 };
 
 // ------------------------
@@ -93,25 +95,29 @@ const saveCookies = async (page: Page, username: string, password?: string): Pro
 // ------------------------
 
 // Perform login only if necessary.
-const performLoginIfNeeded = async (page: Page, USERNAME: string, PASSWORD?: string): Promise<void> => {
-  logger.info('Checking login state...', process.env.LEGACY_SITE_URL);
+const performLoginIfNeeded = async (
+  page: Page,
+  legacySiteUrl: string,
+  USERNAME: string,
+  PASSWORD: string | undefined,
+  cookieCache: KVNamespace
+): Promise<void> => {
+  logger.info('Checking login state...', legacySiteUrl);
   // Navigate to legacy site to check current login state.
-  await page.goto(process.env.LEGACY_SITE_URL || '', { waitUntil: 'networkidle2' });
+  await page.goto(legacySiteUrl || '', { waitUntil: 'networkidle2' });
 
   const isLoggedIn = await safePageEvaluate(page, () => {
     const loginHeader = document.querySelector('h4')?.textContent?.trim();
     if (loginHeader === 'Login to the Library') {
-      logger.info('Not logged in, proceeding to login.');
       return false;
     }
-    logger.info('Already logged in, no need to login again.');
     return true;
   });
 
   if (!isLoggedIn) {
     logger.info('Logging in...');
     // Load login page.
-    await page.goto(`${process.env.LEGACY_SITE_URL}/index.php`, { waitUntil: 'networkidle2' });
+    await page.goto(`${legacySiteUrl}/index.php`, { waitUntil: 'networkidle2' });
     await page.waitForSelector('#libraryname', { timeout: 60000 });
 
     logger.info(`Performing login for user: ${USERNAME} with password: ${(PASSWORD && PASSWORD.length) ? 'provided' : 'not provided'}`);
@@ -125,7 +131,7 @@ const performLoginIfNeeded = async (page: Page, USERNAME: string, PASSWORD?: str
 
     // Instead of waitForNavigation, wait for a post-login element.
     try {
-      // For example, wait for an element that only appears after login such as a logout button.
+      // For example, wait for an element that only appears after login such as a profile image.
       await page.waitForSelector('img[alt="Profile"]', { timeout: 60000 });
       logger.info('Login successful, post-login element found.');
     } catch (error) {
@@ -135,7 +141,7 @@ const performLoginIfNeeded = async (page: Page, USERNAME: string, PASSWORD?: str
 
     // Save cookies for subsequent sessions.
     logger.info('Saving cookies...');
-    await saveCookies(page, USERNAME, PASSWORD);
+    await saveCookies(page, cookieCache, USERNAME, PASSWORD);
     logger.info('Cookies saved successfully.');
   } else {
     logger.info('No login required, cookies already loaded.');
@@ -147,7 +153,7 @@ const performLoginIfNeeded = async (page: Page, USERNAME: string, PASSWORD?: str
 // BookInfo interface and extraction
 // ------------------------
 
-interface BookInfo {
+export interface BookInfo {
   bookJacketUrl: string | null;
   googlePreviewUrl: string | null;
   title: string;
@@ -297,37 +303,55 @@ const extractBookInfo = async (container: ElementHandle<Element>): Promise<BookI
 // Pagination interfaces
 // ------------------------
 
-interface PageMeta {
+export interface PageMeta {
   currentPage: number;
   pageSize: number;
   totalResults: number;
   totalPages: number;
 }
 
-interface ScrapeResponse {
+export interface ScrapeResponse {
   meta: PageMeta;
   results: BookInfo[];
+}
+
+export interface ScrapeLegacyOptions {
+  search: string;
+  username: string;
+  password?: string;
+  targetPage?: number;
+  /** An already-created Puppeteer page from the caller's browser session. */
+  page: Page;
+  /** Base URL of the Legacy Library site. */
+  legacySiteUrl: string;
+  /** KV namespace used to persist login cookies between requests. */
+  cookieCache: KVNamespace;
 }
 
 // ------------------------
 // Scraping function with optional pagination
 // ------------------------
 
-
-logger.info('Browser WebSocket Endpoint:', process.env.BROWSER_WS_ENDPOINT);
-
-export const scrapeLegacySite = async (search: string, USERNAME, PASSWORD = '', targetPage: number = 1, page: Page): Promise<ScrapeResponse> => {
+export const scrapeLegacySite = async ({
+  search,
+  username: USERNAME,
+  password: PASSWORD = '',
+  targetPage = 1,
+  page,
+  legacySiteUrl,
+  cookieCache,
+}: ScrapeLegacyOptions): Promise<ScrapeResponse> => {
   logger.info(`Starting scrape for search term: ${search} on page ${targetPage}`);
 
   // Load cookies if they exist.
-  await loadCookies(page, USERNAME, PASSWORD);
+  await loadCookies(page, cookieCache, USERNAME, PASSWORD);
 
   // Ensure we are logged in.
-  await performLoginIfNeeded(page, USERNAME, PASSWORD);
+  await performLoginIfNeeded(page, legacySiteUrl, USERNAME, PASSWORD, cookieCache);
 
   // Navigate to the home page after login.
   logger.info('Navigating to home page...');
-  await page.goto(`${process.env.LEGACY_SITE_URL}/home.php`, { waitUntil: 'networkidle2' });
+  await page.goto(`${legacySiteUrl}/home.php`, { waitUntil: 'networkidle2' });
 
   // Perform search.
   logger.info(`Searching for term: ${search}`);
@@ -337,12 +361,10 @@ export const scrapeLegacySite = async (search: string, USERNAME, PASSWORD = '', 
   try {
     logger.info('Waiting for navigation after search...');
     // <a href="standard.php?display=Item" class="btn btn-outline-primary btn-sm">Item</a>
-    // look for the above
     await page.waitForSelector('a[href="standard.php?display=Item"]', { timeout: 5000 });
     logger.info('Navigation after search successful.');
   } catch (e) {
     // if waiting for that selector fails, we could just have no results. look for an item with the inner text "No records to display"
-    // const noResultsEl = await page.$('center:contains("No records to display")');
     // select all <center> tags, and check the inner text of each one, if any of them contain "No records to display", then we have no results.
     const noResultsEl = await page.$$eval('center', centers => centers.some((center) => (center as HTMLElement).innerText.includes('No records to display')));
     if (noResultsEl) {
@@ -353,9 +375,8 @@ export const scrapeLegacySite = async (search: string, USERNAME, PASSWORD = '', 
     // If navigation fails, we might be on the same page without a full reload.
     logger.warn('Navigation after search failed.');
     logger.debug('Current URL:', page.url());
-    // console out the current page content for debugging.
     const pageContent = await page.content();
-    logger.debug('Current page content:', pageContent.slice(0, 500)); // Print first 500 characters for brevity.
+    logger.debug('Current page content:', pageContent.slice(0, 500));
     throw new Error('Failed to navigate after search. This might indicate an issue with the search or the page structure.');
   }
 
@@ -404,10 +425,10 @@ export const scrapeLegacySite = async (search: string, USERNAME, PASSWORD = '', 
   await page.waitForSelector('.card > .card-body > .row');
   const containers = await page.$$('.card > .card-body > .row');
   logger.info(`Found ${containers.length} book containers on page ${currentPage}.`);
-  const booksResults = await Promise.all(containers.map(container => extractBookInfo(container)));
+  const booksResults = await Promise.all(containers.map(container => extractBookInfo(container as ElementHandle<Element>)));
   const validBooks = booksResults.filter(book => book !== null) as BookInfo[];
 
-  // Note: We don't close the browser here as it's passed in from the caller
+  // Note: we don't close the browser here as it's passed in from the caller.
 
   return { meta, results: validBooks };
 };

@@ -1,52 +1,41 @@
 /* ================================================================================================
- *  catalog-client.ts
+ *  ycl/client.ts
  *
- *  Generic HTTP/2 client for an online e‑book catalogue.
+ *  HTTP client for the YCL online e-book catalogue, running on Cloudflare Workers.
  *  ────────────────────────────────────────────────────────────────────────────────────────────────
  *  Contains **two** helpers:
  *    • catalogSearch  – endpoint that lists items (search/filters)
  *    • catalogDetail  – endpoint that returns metadata for one item
  *
- *  Every header—including HTTP/2 pseudo‑headers—is set explicitly, so nothing relies on `got`
- *  auto‑injection.  All brand/trademark identifiers have been replaced with neutral placeholders.
- *
- *  Dependencies
- *    • Node ≥ 18
- *    • got ^13       →  `pnpm add got@^13`
+ *  This is a Workers port of the original `got`-based client. Changes:
+ *    • Uses the platform `fetch` (Workers have no raw sockets / `got`).
+ *    • Drops HTTP/2 pseudo-headers (`:path`, `:authority`, …) — `fetch` derives them from the URL.
+ *    • Drops `accept-encoding` and manual gzip/br decompression — `fetch` negotiates and decodes.
  * ==============================================================================================*/
 
-import got, { Headers, HTTPError } from 'got';
-import { URLSearchParams } from 'node:url';
-import {
-  createGunzip,
-  createInflate,
-  createBrotliDecompress,
-} from 'node:zlib';
-import { pipeline } from 'node:stream/promises';
-import { Readable } from 'node:stream';
-import util from 'node:util';
 import loggers from '../utils/logger';
 
 const { ycl: logger } = loggers;
+
+/** Plain header map. Pseudo-headers (`:`-prefixed) are not supported by `fetch`. */
+export type HeaderMap = Record<string, string>;
 
 /* ════════════════════════════════════════════════════════════════════════════════════════════════
  *  CONSTANTS
  * ════════════════════════════════════════════════════════════════════════════════════════════════*/
 
-const STATIC_HEADERS: Headers = {
-  ':method': 'GET', // `:path`, `:authority`, `:scheme` filled per‑request
-  accept: '*/*', // Changed to match the curl command
-  'accept-encoding': 'gzip, deflate, br, zstd', // Added zstd to match curl
+const STATIC_HEADERS: HeaderMap = {
+  accept: '*/*',
   'accept-language': 'en-US,en;q=0.9',
-  'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36', // Updated Chrome version
-  'sec-ch-ua': '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"', // Updated to match curl
+  'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
+  'sec-ch-ua': '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
   'sec-ch-ua-mobile': '?0',
   'sec-ch-ua-platform': '"macOS"',
   'sec-fetch-dest': 'empty',
   'sec-fetch-mode': 'cors',
   'sec-fetch-site': 'same-origin',
-  'priority': 'u=1, i', // Added priority header from curl
-} as const;
+  priority: 'u=1, i',
+};
 
 const DEFAULT_QUERY_PARAMS = {
   format: '',
@@ -57,6 +46,8 @@ const DEFAULT_QUERY_PARAMS = {
   owned: 'yes',
 } as const;
 
+const REQUEST_TIMEOUT_MS = 30000;
+
 /* ════════════════════════════════════════════════════════════════════════════════════════════════
  *  TYPES
  * ════════════════════════════════════════════════════════════════════════════════════════════════*/
@@ -66,13 +57,13 @@ export interface CatalogClientOptions {
   protocol?: 'https' | 'http';
   librarySlug: string;
   cookie: string;
-  headers?: Headers;
+  headers?: HeaderMap;
 }
 
 export interface SearchOptions extends CatalogClientOptions {
-  /** Optional plain‑text search term */
+  /** Optional plain-text search term */
   searchText?: string;
-  /** Optional additional / overriding query‑string filters */
+  /** Optional additional / overriding query-string filters */
   extraParams?: Record<string, string>;
 }
 
@@ -81,9 +72,9 @@ export interface DetailOptions extends CatalogClientOptions {
 }
 
 export interface CatalogResponse<T = unknown> {
-  rawBody: Buffer;
+  rawBody: Uint8Array;
   json?: T;
-  headers: Headers;
+  headers: HeaderMap;
   status: number;
 }
 
@@ -91,41 +82,18 @@ export interface CatalogResponse<T = unknown> {
  *  INTERNAL HELPERS
  * ════════════════════════════════════════════════════════════════════════════════════════════════*/
 
-/** Encode search term: `+` inside query‑string, `%20` inside Referer */
+/** Encode search term: `+` inside query-string, `%20` inside Referer */
 const encodeSearchText = (txt: string) => {
   const uri = encodeURIComponent(txt);
   return { forQuery: uri.replace(/%20/g, '+'), forReferer: uri };
 };
 
-const streamToBuffer = async (s: Readable) => {
-  const acc: Buffer[] = [];
-  for await (const c of s) acc.push(c as Buffer);
-  return Buffer.concat(acc);
-};
-
-const decompress = async (buf: Buffer, enc?: string) => {
-  const key = enc?.split(',')[0]?.trim();
-  const map = { gzip: createGunzip, deflate: createInflate, br: createBrotliDecompress };
-  const fn = key && map[key as keyof typeof map];
-  if (!fn) return buf;
-  const chunks: Buffer[] = [];
-  await pipeline(
-    Readable.from(buf),
-    fn(),
-    async function* (src) {
-      for await (const chunk of src) chunks.push(chunk as Buffer);
-    },
-  );
-  return Buffer.concat(chunks);
-};
-
 /**
  * Sanitize cookie string to remove invalid characters
- * that might cause HTTP/2 header validation to fail
+ * that might cause header validation to fail.
  */
 const sanitizeCookie = (cookie: string | string[]): string => {
   if (Array.isArray(cookie)) {
-    // If it's an array, join with semicolons (standard cookie delimiter)
     return cookie
       .filter(c => typeof c === 'string')
       .map(c => c.replace(/[^\x20-\x7E]/g, ''))
@@ -140,26 +108,22 @@ const sanitizeCookie = (cookie: string | string[]): string => {
     const configCookieLine = cookieLines.find(line => line.startsWith('__config_PROD='));
 
     if (configCookieLine) {
-      // Extract just the cookie name=value part from the line (ignore attributes)
       const parts = configCookieLine.split(';');
-      return parts[0].trim(); // Take just the name=value part
+      return parts[0].trim();
     }
 
-    // If no config cookie found, fall back to filtering
     const validCookieLines = cookieLines.filter(line => !line.startsWith('__session_PROD=;'));
     const cookiePairs = validCookieLines.map(line => {
       const parts = line.split(';');
-      return parts[0].trim(); // Take just the name=value part
+      return parts[0].trim();
     });
 
     return cookiePairs.join('; ').replace(/[^\x20-\x7E]/g, '');
   }
 
-  // If the cookie already starts with __config_PROD=, use it as is
   if (cookie.startsWith('__config_PROD=')) {
-    // Extract just the cookie name=value part (ignore attributes)
     const parts = cookie.split(';');
-    return parts[0].trim(); // Take just the name=value part
+    return parts[0].trim();
   }
 
   // Remove control characters, non-ASCII chars, and other problematic characters
@@ -167,126 +131,47 @@ const sanitizeCookie = (cookie: string | string[]): string => {
 };
 
 /**
- * Separate HTTP/2 pseudo-headers from regular headers
- * This helps avoid issues with header ordering and validation
+ * Merge static, caller and per-request headers into a `fetch`-compatible header map.
+ * Any `:`-prefixed pseudo-headers in the overrides are dropped.
  */
-const buildHeaders = (
-  overrides: Headers,
-  path: string,
-  referer: string,
-  host: string,
-  protocol: string,
-  cookie: string,
-): Headers => {
-  // HTTP/2 pseudo-headers (must start with ':')
-  const pseudoHeaders = {
-    ':path': path,
-    ':authority': host,
-    ':scheme': protocol,
-    ':method': STATIC_HEADERS[':method'],
-  };
+const buildHeaders = (overrides: HeaderMap, referer: string, cookie: string): HeaderMap => {
+  const safeOverrides: HeaderMap = {};
+  for (const [key, value] of Object.entries(overrides)) {
+    if (!key.startsWith(':') && typeof value === 'string') {
+      safeOverrides[key] = value;
+    }
+  }
 
-  // Regular headers (must not start with ':')
-  const regularHeaders = {
-    ...Object.fromEntries(
-      Object.entries(STATIC_HEADERS).filter(([key]) => !key.startsWith(':'))
-    ),
+  return {
+    ...STATIC_HEADERS,
     referer,
     cookie: sanitizeCookie(cookie),
-    ...Object.fromEntries(
-      Object.entries(overrides).filter(([key]) => !key.startsWith(':'))
-    ),
-  };
-
-  // Pseudo-header overrides (if any)
-  const pseudoOverrides = Object.fromEntries(
-    Object.entries(overrides).filter(([key]) => key.startsWith(':'))
-  );
-
-  // Combine in the correct order (pseudo-headers must come first in HTTP/2)
-  return {
-    ...pseudoHeaders,
-    ...pseudoOverrides,
-    ...regularHeaders,
+    ...safeOverrides,
   };
 };
 
-const doRequest = async <T = unknown>(url: string, headers: Headers): Promise<CatalogResponse<T>> => {
+const doRequest = async <T = unknown>(url: string, headers: HeaderMap): Promise<CatalogResponse<T>> => {
   try {
     // Log headers for debugging (but redact cookie value for security)
     const debugHeaders = { ...headers };
     if (debugHeaders.cookie) {
-      // Handle both string and string[] types for cookie
-      if (typeof debugHeaders.cookie === 'string') {
-        debugHeaders.cookie = debugHeaders.cookie.substring(0, 15) + '...';
-      } else if (Array.isArray(debugHeaders.cookie)) {
-        debugHeaders.cookie = debugHeaders.cookie.map(c =>
-          typeof c === 'string' ? c.substring(0, 15) + '...' : c
-        );
-      }
+      debugHeaders.cookie = debugHeaders.cookie.substring(0, 15) + '...';
     }
     logger.debug(`Request: ${url}`);
 
-    // Try with HTTP/2 first
-    try {
-      const rsp = await got(url, {
-        http2: true,
-        headers,
-        decompress: false,
-        throwHttpErrors: false,
-        timeout: {
-          request: 30000 // 30 seconds timeout
-        },
-        retry: {
-          limit: 2,
-          methods: ['GET']
-        }
-      });
+    const rsp = await fetch(url, {
+      method: 'GET',
+      headers,
+      redirect: 'follow',
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
 
-      logger.debug(`Response status (HTTP/2): ${rsp.statusCode}`);
-      return await processResponse<T>(rsp);
-    } catch (http2Error) {
-      // If HTTP/2 fails, fall back to HTTP/1.1
-      logger.warn(`HTTP/2 request failed, falling back to HTTP/1.1: ${http2Error}`);
-
-      // For HTTP/1.1, we need to remove HTTP/2 pseudo-headers
-      const http1Headers = { ...headers };
-      Object.keys(http1Headers).forEach(key => {
-        if (key.startsWith(':')) {
-          delete http1Headers[key];
-        }
-      });
-
-      // Add host header for HTTP/1.1
-      if (headers[':authority']) {
-        http1Headers.host = headers[':authority'];
-      }
-
-      const rsp = await got(url, {
-        http2: false,
-        headers: http1Headers,
-        decompress: false,
-        throwHttpErrors: false,
-        timeout: {
-          request: 30000 // 30 seconds timeout
-        },
-        retry: {
-          limit: 2,
-          methods: ['GET']
-        }
-      });
-
-      logger.debug(`Response status (HTTP/1.1 fallback): ${rsp.statusCode}`);
-      return await processResponse<T>(rsp);
-    }
+    logger.debug(`Response status: ${rsp.status}`);
+    return await processResponse<T>(rsp);
   } catch (err) {
-    if (err instanceof HTTPError) throw err;
-
-    // Enhanced error logging
     logger.error('Request failed:', {
       url,
       error: err instanceof Error ? err.message : String(err),
-      stack: err instanceof Error ? err.stack : undefined,
     });
 
     throw new Error(`catalog-client error: ${String(err)}`);
@@ -294,23 +179,28 @@ const doRequest = async <T = unknown>(url: string, headers: Headers): Promise<Ca
 };
 
 // Helper function to process response
-const processResponse = async <T = unknown>(rsp: any): Promise<CatalogResponse<T>> => {
-  const raw = await decompress(
-    await streamToBuffer(Readable.from(rsp.rawBody)),
-    rsp.headers['content-encoding'],
-  );
+const processResponse = async <T = unknown>(rsp: Response): Promise<CatalogResponse<T>> => {
+  const raw = new Uint8Array(await rsp.arrayBuffer());
+
+  const headers: HeaderMap = {};
+  rsp.headers.forEach((value, key) => {
+    headers[key] = value;
+  });
+  // `set-cookie` is not exposed through forEach; read it explicitly.
+  const setCookie = rsp.headers.get('set-cookie');
+  if (setCookie) headers['set-cookie'] = setCookie;
 
   let json: T | undefined;
-  if ((rsp.headers['content-type'] ?? '').startsWith('application/json')) {
+  if ((headers['content-type'] ?? '').startsWith('application/json')) {
     try {
-      json = JSON.parse(raw.toString('utf-8'));
+      json = JSON.parse(new TextDecoder().decode(raw));
     } catch (jsonError) {
       logger.error('Error parsing JSON response:', jsonError);
-      logger.debug('Raw response preview:', raw.toString('utf-8').substring(0, 200) + '...');
+      logger.debug('Raw response preview:', new TextDecoder().decode(raw).substring(0, 200) + '...');
     }
   }
 
-  return { rawBody: raw, json, headers: rsp.headers, status: rsp.statusCode };
+  return { rawBody: raw, json, headers, status: rsp.status };
 };
 
 /* ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -322,7 +212,7 @@ const processResponse = async <T = unknown>(rsp: any): Promise<CatalogResponse<T
  *
  * `searchText` *and* `extraParams.query` are optional: you may call this with
  * category filters (e.g. `author`, `subject`, etc.) only, which mimics how the
- * site behaves when you browse without a free‑text query.
+ * site behaves when you browse without a free-text query.
  */
 export const catalogSearch = async <T = unknown>({
   host,
@@ -335,7 +225,6 @@ export const catalogSearch = async <T = unknown>({
 }: SearchOptions): Promise<CatalogResponse<T>> => {
   const enc = searchText?.trim() ? encodeSearchText(searchText) : null;
 
-  // Create params object
   const paramsObj = {
     ...DEFAULT_QUERY_PARAMS,
     ...extraParams,
@@ -355,7 +244,7 @@ export const catalogSearch = async <T = unknown>({
       : `${protocol}://${host}/library/${librarySlug}/search${params ? `?${params}` : ''}`;
 
   const URL_FULL = `${protocol}://${host}${PATH}`;
-  const hdrs = buildHeaders(headers, PATH, REFERER, host, protocol, cookie);
+  const hdrs = buildHeaders(headers, REFERER, cookie);
   return doRequest(URL_FULL, hdrs);
 };
 
@@ -376,6 +265,6 @@ export const catalogDetail = async <T = unknown>({
   const REFERER = `${protocol}://${host}/library/${librarySlug}/detail/${itemId}`;
   const URL_FULL = `${protocol}://${host}${PATH}`;
 
-  const hdrs = buildHeaders(headers, PATH, REFERER, host, protocol, cookie);
+  const hdrs = buildHeaders(headers, REFERER, cookie);
   return doRequest(URL_FULL, hdrs);
 };

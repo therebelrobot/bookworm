@@ -1,0 +1,36 @@
+{
+  "name": "library-media-search-worker",
+  "version": "1.0.0",
+  "description": "Unified library media search API running on Cloudflare Workers",
+  "private": true,
+  "main": "src/server.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "start": "wrangler dev",
+    "build": "wrangler deploy --dry-run --outdir=dist",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "check": "npm run typecheck && npm run build",
+    "typecheck": "tsc --noEmit",
+    "cf-typegen": "wrangler types",
+    "login": "wrangler login",
+    "logout": "wrangler logout",
+    "whoami": "wrangler whoami",
+    "secrets:list": "wrangler secret list",
+    "secrets:put": "wrangler secret put",
+    "secrets:push": "wrangler secret bulk .dev.vars",
+    "secrets:delete": "wrangler secret delete",
+    "kv:create": "wrangler kv namespace create COOKIE_CACHE",
+    "kv:list": "wrangler kv namespace list"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "hono": "^4.6.14"
+  },
+  "devDependencies": {
+    "@cloudflare/puppeteer": "^1.1.0",
+    "typescript": "^5.7.3",
+    "wrangler": "^4.42.0"
+  }
+}
